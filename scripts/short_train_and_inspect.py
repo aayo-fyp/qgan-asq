@@ -1,4 +1,5 @@
 import time
+import os
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -19,8 +20,8 @@ config.lambda_cls = 1
 config.lambda_rec = 10
 config.lambda_gp = 10
 config.post_method = 'softmax'
-config.batch_size = 4
-config.num_iters = 10
+config.batch_size = 2
+config.num_iters = 2
 config.num_iters_decay = 2500
 config.g_lr = 0.0001
 config.d_lr = 0.0001
@@ -50,7 +51,8 @@ config.patches = 1
 config.layer = 1
 config.quantum = False
 config.complexity = 'mr'
-config.mol_data_dir = 'data/gdb9.sparsedataset'
+base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+config.mol_data_dir = os.path.join(base_dir, 'data', 'gdb9.sparsedataset')
 config.use_tensorboard = False
 
 print('Building solver and running short training...')

@@ -220,7 +220,12 @@ def main(config):
 
             # Log update
             m0, m1 = all_scores(mols, self.data, norm=True)     # 'mols' is output of Fake Reward
-            m0 = {k: np.array(v)[np.nonzero(v)].mean() for k, v in m0.items()}
+            _safe = {}
+            for k, v in m0.items():
+                arr = np.array(v)
+                nz = arr[np.nonzero(arr)]
+                _safe[k] = nz.mean() if nz.size > 0 else float('nan')
+            m0 = _safe
             m0.update(m1)
             loss.update(m0)
             for tag, value in loss.items():
