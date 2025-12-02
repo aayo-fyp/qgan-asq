@@ -31,6 +31,23 @@ If you want to run classical MolGAN, please set quantum argument to False. But y
 ```
 python p2_qgan_hg.py
 ```
+
+## HQCycle and batched QDI
+
+To enable the hybrid HQCycle (classical encoder + QDI quantum block) use the CLI flags:
+
+```
+--cycle hq --lambda_cycle 1.0
+```
+
+To enable batched QDI execution (faster in simulators that support it):
+
+```
+--qdi_batch True
+```
+
+This attempts to use the quantum device's batch_execute API to run a full mini-batch in a single call. If the backend doesn't support batching, the implementation falls back to per-sample execution automatically. Batched mode is opt-in to preserve per-sample behavior for reproducibility.
+
 Run 'p2_qgan_hg'.py or 'p4_qgan_hg.py' for implementing patched quantum GAN with hybrid generator for 2 pathes and 4 patches, respectively.
 
 

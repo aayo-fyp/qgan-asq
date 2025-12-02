@@ -10,6 +10,14 @@ import torch
 import torch.nn as nn
 from typing import List, Optional
 
+# Optional quantum components (QDILayer may not be available in all environments)
+try:
+    from quantum_layers import QDILayer
+    HAS_QUANTUM = True
+except Exception:
+    QDILayer = None
+    HAS_QUANTUM = False
+
 
 class ClassicalCycle(nn.Module):
     """
@@ -120,15 +128,102 @@ class ClassicalCycle(nn.Module):
     def count_parameters(self) -> int:
         """Return the total number of trainable parameters."""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
-    
+
     def __repr__(self) -> str:
         return (
-            f"ClassicalCycle("
-            f"input_dim={self.input_dim}, "
-            f"hidden_dims={self.hidden_dims}, "
-            f"output_dim={self.output_dim}, "
-            f"dropout={self.dropout_rate}, "
-            f"params={self.count_parameters()})"
+            f"ClassicalCycle(input_dim={self.input_dim}, hidden_dims={self.hidden_dims}, "
+            f"output_dim={self.output_dim}, dropout={self.dropout_rate}, params={self.count_parameters()})"
+        )
+
+
+class HQCycle(nn.Module):
+    """Hybrid Quantum Cycle: Classical encoder -> QDI quantum block -> optional mapper.
+
+    This composes a `ClassicalCycle` that reduces a flattened graph/features tensor
+    to an intermediate classical vector (default 64), then feeds that vector into
+    a `QDILayer` which encodes into qubits using repeated encoding layers and
+    returns a per-qubit expectation vector. An optional linear mapper projects
+    the quantum output to the desired latent `z_dim` for the Generator.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        intermediate_dim: int = 64,
+        z_dim: int = 8,
+        classical_hidden: Optional[List[int]] = None,
+        qdi_kwargs: Optional[dict] = None,
+    ):
+        super(HQCycle, self).__init__()
+
+        if not HAS_QUANTUM or QDILayer is None:
+            raise RuntimeError("QDILayer (pennylane) not available in this environment")
+
+        self.input_dim = int(input_dim)
+        self.intermediate_dim = int(intermediate_dim)
+        self.z_dim = int(z_dim)
+
+        classical_hidden = classical_hidden or [128, 64]
+        self.classical_encoder = ClassicalCycle(
+            input_dim=self.input_dim,
+            hidden_dims=classical_hidden,
+            output_dim=self.intermediate_dim,
+            activation='tanh',
+            dropout=0.0,
+            output_activation=False,
+        )
+
+        qdi_kwargs = qdi_kwargs or {}
+        # Ensure QDILayer n_qubits matches desired z_dim by default
+        n_qubits = qdi_kwargs.get('n_qubits', self.z_dim)
+        qdi_call_kwargs = dict(qdi_kwargs)
+        qdi_call_kwargs.pop('n_qubits', None)
+        self.qdi = QDILayer(input_dim=self.intermediate_dim, n_qubits=n_qubits, **qdi_call_kwargs)
+
+        # If quantum output dim differs from requested z_dim, add a mapper
+        if self.qdi.n_qubits != self.z_dim:
+            self.post_mapper = nn.Linear(self.qdi.n_qubits, self.z_dim)
+        else:
+            self.post_mapper = None
+
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass: x -> classical encoder -> qdi -> optional mapper -> z
+
+        Args:
+            x: Tensor of shape (batch, input_dim)
+
+        Returns:
+            z: Tensor of shape (batch, z_dim)
+        """
+        # classical reduction
+        hidden = self.classical_encoder(x)
+
+        # quantum block: returns (batch, n_qubits)
+        q_out = self.qdi(hidden)
+
+        if self.post_mapper is not None:
+            z = self.post_mapper(q_out)
+        else:
+            z = q_out
+
+        return z
+
+    def count_parameters(self) -> int:
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+    def __repr__(self) -> str:
+        return (
+            f"HQCycle(input_dim={self.input_dim}, intermediate_dim={self.intermediate_dim}, "
+            f"z_dim={self.z_dim}, params={self.count_parameters()})"
         )
 
 

@@ -12,6 +12,15 @@ from utils import *
 from models import Generator, Discriminator
 from data.sparse_molecular_dataset import SparseMolecularDataset
 
+# Optional cycle components
+try:
+    from cycle_components import ClassicalCycle, HQCycle
+    HAS_CYCLE = True
+except Exception:
+    ClassicalCycle = None
+    HQCycle = None
+    HAS_CYCLE = False
+
 
 class Solver(object):
     """Solver for training and testing StarGAN."""
@@ -57,6 +66,17 @@ class Solver(object):
         self.use_tensorboard = config.use_tensorboard
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+        # Cycle configuration (optional)
+        self.cycle_type = getattr(config, 'cycle', 'classical')
+        self.lambda_cycle = float(getattr(config, 'lambda_cycle', 0.0))
+        # QDI kwargs
+        self.qdi_kwargs = {
+            'n_reps': int(getattr(config, 'qdi_reps', 2)),
+            'n_layers': int(getattr(config, 'qdi_layers', 1)),
+            'n_qubits': int(getattr(config, 'qubits', self.z_dim)),
+            'batch': bool(getattr(config, 'qdi_batch', False)),
+        }
+
         # Directories.
         self.log_dir = config.log_dir
         self.sample_dir = config.sample_dir
@@ -84,8 +104,27 @@ class Solver(object):
         self.D = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim, self.dropout)
         self.V = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim, self.dropout)
 
-        self.g_optimizer = torch.optim.Adam(list(self.G.parameters())+list(self.V.parameters()),
-                                            self.g_lr, [self.beta1, self.beta2])
+        # Instantiate cycle component if requested
+        self.cycle = None
+        if self.cycle_type and self.cycle_type.lower() != 'none' and HAS_CYCLE:
+            input_dim = (self.data.vertexes * self.data.atom_num_types) + (
+                self.data.vertexes * self.data.vertexes * self.data.bond_num_types)
+            if self.cycle_type.lower() == 'hq':
+                # HQCycle will internally construct QDILayer with qdi_kwargs
+                self.cycle = HQCycle(input_dim=input_dim, intermediate_dim=64, z_dim=self.z_dim,
+                                     classical_hidden=[128, 64], qdi_kwargs=self.qdi_kwargs)
+            else:
+                self.cycle = ClassicalCycle(input_dim=input_dim, hidden_dims=[128, 64], output_dim=self.z_dim)
+
+            if self.cycle is not None:
+                self.cycle.to(self.device)
+
+        # Include cycle parameters in generator optimizer if trainable
+        g_params = list(self.G.parameters()) + list(self.V.parameters())
+        if self.cycle is not None:
+            g_params += list(self.cycle.parameters())
+
+        self.g_optimizer = torch.optim.Adam(g_params, self.g_lr, [self.beta1, self.beta2])
         self.d_optimizer = torch.optim.Adam(self.D.parameters(), self.d_lr, [self.beta1, self.beta2])
         self.print_network(self.G, 'G')
         self.print_network(self.D, 'D')
@@ -313,7 +352,22 @@ class Solver(object):
                 #f_loss = (torch.mean(features_real, 0) - torch.mean(features_fake, 0)) ** 2
 
                 # Backward and optimize.
-                g_loss = g_loss_fake + g_loss_value
+                # Cycle reconstruction loss (if cycle present)
+                cycle_loss = torch.tensor(0., device=self.device)
+                if self.cycle is not None and self.lambda_cycle > 0:
+                    # Build flattened features: nodes then edges
+                    batch = edges_logits.size(0)
+                    nodes_flat = nodes_hat.view(batch, -1)
+                    edges_flat = edges_hat.view(batch, -1)
+                    cycle_input = torch.cat([nodes_flat, edges_flat], dim=1)
+                    z_hat = self.cycle(cycle_input)
+                    # ensure shapes match
+                    if z_hat.shape != z.shape:
+                        # project if necessary
+                        z_hat = z_hat.view(z.shape)
+                    cycle_loss = F.mse_loss(z, z_hat)
+
+                g_loss = g_loss_fake + g_loss_value + self.lambda_cycle * cycle_loss
                 self.reset_grad()
                 g_loss.backward()
                 self.g_optimizer.step()
@@ -321,6 +375,8 @@ class Solver(object):
                 # Logging.
                 loss['G/loss_fake'] = g_loss_fake.item()
                 loss['G/loss_value'] = g_loss_value.item()
+                if self.cycle is not None:
+                    loss['G/loss_cycle'] = cycle_loss.item()
 
             # =================================================================================== #
             #                                 4. Miscellaneous                                    #

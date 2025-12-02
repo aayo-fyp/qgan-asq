@@ -1,7 +1,30 @@
-# Code referenced from https://gist.github.com/gyglim/1f8dfb1b5c82627ae3efcfbbadb9f514
-import tensorflow as tf
+"""Lightweight logger that works with TensorFlow 1.x APIs.
+
+If TensorFlow 2.x is installed, we import the v1 compatibility module and
+disable v2 behavior so the existing TF1-style summary API continues to work.
+This avoids requiring users to install TF1 on systems where TF2 is present.
+
+Based on: https://gist.github.com/gyglim/1f8dfb1b5c82627ae3efcfbbadb9f514
+"""
 import numpy as np
-import scipy.misc 
+import scipy.misc
+
+try:
+    # Prefer TF1 API. If TF2 is present, use the compat.v1 shim and disable v2.
+    import tensorflow as _tf
+    if _tf.__version__.startswith('2'):
+        try:
+            # Use v1 compatibility mode
+            import tensorflow.compat.v1 as tf
+            tf.disable_v2_behavior()
+        except Exception:
+            # Fall back to original import if compat not available
+            tf = _tf
+    else:
+        tf = _tf
+except Exception:
+    # If TensorFlow isn't available at all, raise a clear error when Logger is used.
+    tf = None
 try:
     from StringIO import StringIO  # Python 2.7
 except ImportError:
@@ -12,6 +35,8 @@ class Logger(object):
     
     def __init__(self, log_dir):
         """Create a summary writer logging to log_dir."""
+        if tf is None:
+            raise RuntimeError("TensorFlow is required for Logger (install tensorflow).")
         self.writer = tf.summary.FileWriter(log_dir)
 
     def scalar_summary(self, tag, value, step):

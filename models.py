@@ -4,6 +4,15 @@ import torch.nn.functional as F
 import numpy as np
 from layers import GraphConvolution, GraphAggregation
 
+# optional quantum layer (soft dependency)
+try:
+    from quantum_layers import VVRQLayer, vqc_truncated_dim
+    HAS_QUANTUM = True
+except Exception:
+    VVRQLayer = None
+    vqc_truncated_dim = None
+    HAS_QUANTUM = False
+
 
 class ResidualBlock(nn.Module):
     """Residual Block with instance normalization."""
@@ -22,12 +31,27 @@ class ResidualBlock(nn.Module):
 
 class Generator(nn.Module):
     """Generator network."""
-    def __init__(self, conv_dims, z_dim, vertexes, edges, nodes, dropout):
+    def __init__(self, conv_dims, z_dim, vertexes, edges, nodes, dropout,
+                 quantum: bool = False, vqc_kwargs: dict = None):
         super(Generator, self).__init__()
 
         self.vertexes = vertexes
         self.edges = edges
         self.nodes = nodes
+
+        self.quantum = bool(quantum) and HAS_QUANTUM
+        self.vqc_mapper = None
+        if self.quantum:
+            # vqc_kwargs should contain n_qubits, n_layers, n_ancilla
+            vqc_kwargs = vqc_kwargs or {}
+            n_qubits = int(vqc_kwargs.get('n_qubits', 3))
+            n_layers = int(vqc_kwargs.get('n_layers', 1))
+            n_ancilla = int(vqc_kwargs.get('n_ancilla', 0))
+            # create VVRQ layer
+            self.vqc = VVRQLayer(n_qubits=n_qubits, n_layers=n_layers, n_ancilla=n_ancilla)
+            # linear mapper from truncated vqc dim -> expected z_dim
+            truncated = vqc_truncated_dim(n_qubits, n_ancilla)
+            self.vqc_mapper = nn.Linear(truncated, z_dim)
 
         layers = []
         for c0, c1 in zip([z_dim]+conv_dims[:-1], conv_dims):
@@ -41,7 +65,14 @@ class Generator(nn.Module):
         self.dropoout = nn.Dropout(p=dropout)
 
     def forward(self, x):
-        output = self.layers(x)
+        # if quantum mode is enabled, x should be the noise vector consumed by the VQC
+        if self.quantum:
+            # pass through quantum layer -> mapper -> acts as latent z
+            z_q = self.vqc(x)
+            z = self.vqc_mapper(z_q)
+            output = self.layers(z)
+        else:
+            output = self.layers(x)
         edges_logits = self.edges_layer(output)\
                        .view(-1,self.edges,self.vertexes,self.vertexes)
         edges_logits = (edges_logits + edges_logits.permute(0,1,3,2))/2

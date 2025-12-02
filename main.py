@@ -85,8 +85,12 @@ def main(config):
         x_tensor = self.label2onehot(x, self.m_dim)
         
         if config.quantum:
-            sample_list = [gen_circuit(gen_weights) for i in range(self.batch_size)]
-            z = torch.stack(tuple(sample_list)).to(self.device).float()
+            # gen_circuit may return a Python list (of scalars) depending on the
+            # PennyLane QNode return type. Ensure we convert each output to a
+            # torch.Tensor before stacking so torch.stack receives tensors.
+            sample_list = [torch.as_tensor(gen_circuit(gen_weights), dtype=torch.float32)
+                           for _ in range(self.batch_size)]
+            z = torch.stack(sample_list).to(self.device).float()
         else:
             z = self.sample_z(self.batch_size)
             z = torch.from_numpy(z).to(self.device).float()
@@ -223,10 +227,19 @@ def main(config):
                 log += ", {}: {:.4f}".format(tag, value)
             print(log)
 
-            with open(os.path.join(self.resutl_dir, 'metric_scores_log.csv'), 'a') as file:
+            with open(os.path.join(self.result_dir, 'metric_scores_log.csv'), 'a') as file:
                 writer = csv.writer(file)
-                writer.writerow([i+1, et]+[torch.mean(rewardR).item(), torch.mean(rewardF).item()]+\
-                               [value for tag, value in loss.items()])
+                # rewardR/rewardF are only defined when the generator update ran
+                # in this iteration. Guard against missing values when logging.
+                if 'rewardR' in locals():
+                    mean_rewardR = torch.mean(rewardR).item()
+                else:
+                    mean_rewardR = float('nan')
+                if 'rewardF' in locals():
+                    mean_rewardF = torch.mean(rewardF).item()
+                else:
+                    mean_rewardF = float('nan')
+                writer.writerow([i+1, et, mean_rewardR, mean_rewardF] + [value for tag, value in loss.items()])
 
             if self.use_tensorboard or True:
                 for tag, value in loss.items():
@@ -259,6 +272,13 @@ if __name__ == '__main__':
     parser.add_argument('--patches', type=int, default=1, help='number of quantum circuit patches')
     parser.add_argument('--layer', type=int, default=1, help='number of repeated variational quantum layer')
     parser.add_argument('--qubits', type=int, default=8, help='number of qubits and dimension of domain labels')
+    
+    # Cycle options
+    parser.add_argument('--cycle', type=str, default='classical', choices=['classical','hq','none'], help='cycle component to use (classical or hq)')
+    parser.add_argument('--lambda_cycle', type=float, default=0.0, help='weight for cycle reconstruction loss')
+    parser.add_argument('--qdi_reps', type=int, default=2, help='repetitions for QDI layer')
+    parser.add_argument('--qdi_layers', type=int, default=1, help='variational layers inside QDI')
+    parser.add_argument('--qdi_batch', type=bool, default=False, help='enable batched QDI execution (device.batch_execute)')
 
     # Model configuration.
     parser.add_argument('--complexity', type=str, default='mr', help='dimension of domain labels')
