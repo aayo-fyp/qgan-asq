@@ -154,7 +154,10 @@ class SparseMolecularDataset():
         self.__len = len(self.data)
 
     def _genA(self, mol, connected=True, max_length=None):
-
+        """
+        Returns a padded adjacency matrix of bond types for the molecule. 
+        Only returns if the molecule is fully connected (no isolated atoms).
+        """
         max_length = max_length if max_length is not None else mol.GetNumAtoms()
 
         A = np.zeros(shape=(max_length, max_length), dtype=np.int32)
@@ -170,21 +173,24 @@ class SparseMolecularDataset():
         return A if connected and (degree > 0).all() else None
 
     def _genX(self, mol, max_length=None):
-
+        """ Returns a padded array of atom type indices for the molecule. """
         max_length = max_length if max_length is not None else mol.GetNumAtoms()
 
         return np.array([self.atom_encoder_m[atom.GetAtomicNum()] for atom in mol.GetAtoms()] + [0] * (
                     max_length - mol.GetNumAtoms()), dtype=np.int32)
 
     def _genS(self, mol, max_length=None):
-
+        """ Returns a padded array of SMILES character indices for the molecule. """
         max_length = max_length if max_length is not None else len(Chem.MolToSmiles(mol))
 
         return np.array([self.smiles_encoder_m[c] for c in Chem.MolToSmiles(mol)] + [self.smiles_encoder_m['E']] * (
                     max_length - len(Chem.MolToSmiles(mol))), dtype=np.int32)
 
     def _genF(self, mol, max_length=None):
-
+        """
+        Returns a padded matrix of atom-level features 
+        (degree, valence, hybridization, aromaticity, etc.).
+        """
         max_length = max_length if max_length is not None else mol.GetNumAtoms()
 
         features = np.array([[*[a.GetDegree() == i for i in range(5)],
