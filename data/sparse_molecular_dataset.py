@@ -64,8 +64,13 @@ class SparseMolecularDataset():
         self._generate_train_validation_test(validation, test)
 
     def _generate_encoders_decoders(self):
+        """
+        Creates lookup tables (encoders/decoders) for atom types, bond types, and SMILES characters found in the dataset.
+        This allows molecules to be converted to/from integer arrays for neural network processing.
+        """
         self.log('Creating atoms encoder and decoder..')
         atom_labels = sorted(set([atom.GetAtomicNum() for mol in self.data for atom in mol.GetAtoms()] + [0]))
+        # atom_encoder_m (atomic num to index), atom_decoder_m (index to atomic num)
         self.atom_encoder_m = {l: i for i, l in enumerate(atom_labels)}
         self.atom_decoder_m = {i: l for i, l in enumerate(atom_labels)}
         self.atom_num_types = len(atom_labels)
@@ -76,7 +81,7 @@ class SparseMolecularDataset():
         bond_labels = [Chem.rdchem.BondType.ZERO] + list(sorted(set(bond.GetBondType()
                                                                     for mol in self.data
                                                                     for bond in mol.GetBonds())))
-
+        # bond_encoder_m (bond type to index), bond_decoder_m (index to bond type)
         self.bond_encoder_m = {l: i for i, l in enumerate(bond_labels)}
         self.bond_decoder_m = {i: l for i, l in enumerate(bond_labels)}
         self.bond_num_types = len(bond_labels)
@@ -85,6 +90,7 @@ class SparseMolecularDataset():
 
         self.log('Creating SMILES encoder and decoder..')
         smiles_labels = ['E'] + list(set(c for mol in self.data for c in Chem.MolToSmiles(mol)))
+        # smiles_encoder_m (character to index), smiles_decoder_m (index to character)
         self.smiles_encoder_m = {l: i for i, l in enumerate(smiles_labels)}
         self.smiles_decoder_m = {i: l for i, l in enumerate(smiles_labels)}
         self.smiles_num_types = len(smiles_labels)
@@ -92,6 +98,13 @@ class SparseMolecularDataset():
             self.smiles_num_types - 1))
 
     def _generate_AX(self):
+        """
+        Converts each molecule in self.data into a set of numerical arrays:
+        - Adjacency matrix (bonds)
+        - Node features (atom types)
+        - SMILES sequence (as ints)
+        - Degree, feature matrix, Laplacian eigenvalues/vectors, etc.
+        """
         self.log('Creating features and adjacency matrices..')
 
         data = []
