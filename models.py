@@ -54,7 +54,7 @@ class Generator(nn.Module):
             self.vqc_mapper = nn.Linear(truncated, z_dim)
 
         layers = []
-        for c0, c1 in zip([z_dim]+conv_dims[:-1], conv_dims):
+        for c0, c1 in zip([z_dim] + conv_dims[:-1], conv_dims):
             layers.append(nn.Linear(c0, c1))
             layers.append(nn.Tanh())
             layers.append(nn.Dropout(p=dropout, inplace=True))
@@ -73,13 +73,14 @@ class Generator(nn.Module):
             output = self.layers(z)
         else:
             output = self.layers(x)
-        edges_logits = self.edges_layer(output)\
-                       .view(-1,self.edges,self.vertexes,self.vertexes)
-        edges_logits = (edges_logits + edges_logits.permute(0,1,3,2))/2
-        edges_logits = self.dropoout(edges_logits.permute(0,2,3,1))
+
+        edges_logits = self.edges_layer(output) \
+                       .view(-1, self.edges, self.vertexes, self.vertexes)
+        edges_logits = (edges_logits + edges_logits.permute(0, 1, 3, 2)) / 2
+        edges_logits = self.dropoout(edges_logits.permute(0, 2, 3, 1))
 
         nodes_logits = self.nodes_layer(output)
-        nodes_logits = self.dropoout(nodes_logits.view(-1,self.vertexes,self.nodes))
+        nodes_logits = self.dropoout(nodes_logits.view(-1, self.vertexes, self.nodes))
 
         return edges_logits, nodes_logits
 
@@ -87,35 +88,83 @@ class Generator(nn.Module):
 class Discriminator(nn.Module):
     """Discriminator network with PatchGAN."""
     def __init__(self, conv_dim, m_dim, b_dim, dropout):
+        """
+        conv_dim: tuple (graph_conv_dim, aux_dim, linear_dim).
+            graph_conv_dim is a list like [128, 64] and graph_conv_dim[-1] is used.
+        m_dim: node feature dim (m_dim)
+        b_dim: auxiliary dim appended to in_features when building GraphAggregation
+        dropout: dropout rate
+        """
         super(Discriminator, self).__init__()
 
         graph_conv_dim, aux_dim, linear_dim = conv_dim
+        self.graph_conv_dim = graph_conv_dim
+        self.aux_dim = aux_dim
+        self.linear_dim = linear_dim
+        self.init_b_dim = b_dim  # keep original value for reference
+        self.dropout = dropout
+
         # discriminator
         self.gcn_layer = GraphConvolution(m_dim, graph_conv_dim, b_dim, dropout)
+        # build aggregation with the provided b_dim initially
         self.agg_layer = GraphAggregation(graph_conv_dim[-1], aux_dim, b_dim, dropout)
 
         # multi dense layer
         layers = []
-        for c0, c1 in zip([aux_dim]+linear_dim[:-1], linear_dim):
-            layers.append(nn.Linear(c0,c1))
+        for c0, c1 in zip([aux_dim] + linear_dim[:-1], linear_dim):
+            layers.append(nn.Linear(c0, c1))
             layers.append(nn.Dropout(dropout))
         self.linear_layer = nn.Sequential(*layers)
 
         self.output_layer = nn.Linear(linear_dim[-1], 1)
 
+    def _rebuild_agg_layer(self, annotations):
+        """
+        Rebuild self.agg_layer to match the runtime annotations size if the
+        expected input size differs from actual annotations.shape[-1].
+        """
+        # annotations shape: (batch, vertexes, annotation_dim)
+        annotation_dim = annotations.shape[-1]
+        expected_in = self.graph_conv_dim[-1]  # h dim
+        # deduce runtime b_dim:
+        runtime_b_dim = annotation_dim - expected_in
+        if runtime_b_dim <= 0:
+            raise RuntimeError(f"Runtime computed b_dim={runtime_b_dim} is invalid (<=0). "
+                               f"annotation_dim={annotation_dim}, expected_in={expected_in}")
+        # recreate the aggregation layer with the runtime b_dim
+        self.agg_layer = GraphAggregation(expected_in, self.aux_dim, runtime_b_dim, self.dropout)
+        # (optional) log/debug:
+        # print(f"[models.Discriminator] Rebuilt agg_layer with runtime_b_dim={runtime_b_dim}, annotation_dim={annotation_dim}")
+
     def forward(self, adj, hidden, node, activatation=None):
-        adj = adj[:,:,:,1:].permute(0,3,1,2)
-        annotations = torch.cat((hidden, node), -1) if hidden is not None else node
-        h = self.gcn_layer(annotations, adj)
-        annotations = torch.cat((h, hidden, node) if hidden is not None\
-                                 else (h, node), -1)
-        h = self.agg_layer(annotations, torch.tanh)
-        h = self.linear_layer(h)
+        # adj expected in shape (batch, ???, vertexes, vertexes+1) per calling code;
+        # original code took adj[:,:,:,1:].permute(0,3,1,2)
+        adj = adj[:, :, :, 1:].permute(0, 3, 1, 2)
 
-        # Need to implemente batch discriminator #
-        ##########################################
+        # annotations: if hidden present, concat(hidden, node), else node
+        annotations1 = torch.cat((hidden, node), -1) if hidden is not None else node
 
-        output = self.output_layer(h)
+        # pass through GCN
+        h = self.gcn_layer(annotations1, adj)
+        # create annotations2: concat(h, hidden, node) (or h,node if no hidden)
+        annotations2 = torch.cat((h, hidden, node) if hidden is not None else (h, node), -1)
+
+        # Defensive: ensure agg_layer was created with matching in_features + b_dim.
+        # The first Linear in agg_layer.sigmoid_linear is the Linear module we want to match.
+        try:
+            expected_linear_in = self.agg_layer.sigmoid_linear[0].in_features
+        except Exception:
+            expected_linear_in = None
+
+        if expected_linear_in is None or expected_linear_in != annotations2.shape[-1]:
+            # rebuild to match runtime shape
+            self._rebuild_agg_layer(annotations2)
+
+        # pass through aggregation and linear layers
+        h_agg = self.agg_layer(annotations2, torch.tanh)
+        h_lin = self.linear_layer(h_agg)
+
+        output = self.output_layer(h_lin)
         output = activatation(output) if activatation is not None else output
 
-        return output, h
+        return output, h_lin

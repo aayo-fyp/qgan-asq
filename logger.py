@@ -1,96 +1,70 @@
-"""Lightweight logger that works with TensorFlow 1.x APIs.
+"""Lightweight TensorBoard logger using PyTorch's SummaryWriter.
 
-If TensorFlow 2.x is installed, we import the v1 compatibility module and
-disable v2 behavior so the existing TF1-style summary API continues to work.
-This avoids requiring users to install TF1 on systems where TF2 is present.
+This module replaces the previous TensorFlow-based logger. It provides a
+backwards-compatible API with three methods used by the codebase:
 
-Based on: https://gist.github.com/gyglim/1f8dfb1b5c82627ae3efcfbbadb9f514
+- scalar_summary(tag, value, step)
+- image_summary(tag, images, step)
+- histo_summary(tag, values, step, bins=1000)
+
+It uses torch.utils.tensorboard.SummaryWriter under the hood so the project
+no longer depends on TensorFlow.
 """
+from typing import Sequence
 import numpy as np
-import scipy.misc
 
 try:
-    # Prefer TF1 API. If TF2 is present, use the compat.v1 shim and disable v2.
-    import tensorflow as _tf
-    if _tf.__version__.startswith('2'):
-        try:
-            # Use v1 compatibility mode
-            import tensorflow.compat.v1 as tf
-            tf.disable_v2_behavior()
-        except Exception:
-            # Fall back to original import if compat not available
-            tf = _tf
-    else:
-        tf = _tf
-except Exception:
-    # If TensorFlow isn't available at all, raise a clear error when Logger is used.
-    tf = None
-try:
-    from StringIO import StringIO  # Python 2.7
-except ImportError:
-    from io import BytesIO         # Python 3.x
+    from torch.utils.tensorboard import SummaryWriter
+except Exception as e:
+    # Fail fast with a clear message so callers know to install tensorboard
+    raise RuntimeError(
+        "tensorboard is required for logging. Install it in your environment with: `pip install tensorboard` or `conda install -c conda-forge tensorboard`. Original error: %s" % e
+    )
 
 
-class Logger(object):
-    
-    def __init__(self, log_dir):
-        """Create a summary writer logging to log_dir."""
-        if tf is None:
-            raise RuntimeError("TensorFlow is required for Logger (install tensorflow).")
-        self.writer = tf.summary.FileWriter(log_dir)
+class Logger:
+    """Wrapper around torch.utils.tensorboard.SummaryWriter.
 
-    def scalar_summary(self, tag, value, step):
-        """Log a scalar variable."""
-        summary = tf.Summary(value=[tf.Summary.Value(tag=tag, simple_value=value)])
-        self.writer.add_summary(summary, step)
+    This logger requires the `tensorboard` package to be installed. It mirrors
+    the minimal API used elsewhere in the codebase.
+    """
 
-    def image_summary(self, tag, images, step):
-        """Log a list of images."""
+    def __init__(self, log_dir: str):
+        self.writer = SummaryWriter(log_dir)
 
-        img_summaries = []
+    def scalar_summary(self, tag: str, value: float, step: int) -> None:
+        val = float(value) if hasattr(value, '__float__') else value
+        self.writer.add_scalar(tag, val, step)
+
+    def image_summary(self, tag: str, images: Sequence, step: int) -> None:
+        import torch
+
         for i, img in enumerate(images):
-            # Write the image to a string
-            try:
-                s = StringIO()
-            except:
-                s = BytesIO()
-            scipy.misc.toimage(img).save(s, format="png")
+            if isinstance(img, np.ndarray):
+                arr = img
+                if arr.ndim == 2:
+                    tensor = torch.from_numpy(arr).unsqueeze(0)
+                elif arr.ndim == 3:
+                    tensor = torch.from_numpy(arr).permute(2, 0, 1)
+                else:
+                    tensor = torch.from_numpy(arr)
+            else:
+                tensor = img
 
-            # Create an Image object
-            img_sum = tf.Summary.Image(encoded_image_string=s.getvalue(),
-                                       height=img.shape[0],
-                                       width=img.shape[1])
-            # Create a Summary value
-            img_summaries.append(tf.Summary.Value(tag='%s/%d' % (tag, i), image=img_sum))
+            if getattr(tensor, 'is_floating_point', lambda: False)():
+                try:
+                    tmin = float(tensor.min())
+                    tmax = float(tensor.max())
+                    if tmax > tmin:
+                        tensor = (tensor - tmin) / (tmax - tmin)
+                except Exception:
+                    pass
 
-        # Create and write Summary
-        summary = tf.Summary(value=img_summaries)
-        self.writer.add_summary(summary, step)
-        
-    def histo_summary(self, tag, values, step, bins=1000):
-        """Log a histogram of the tensor of values."""
+            self.writer.add_image(f"{tag}/{i}", tensor, step)
 
-        # Create a histogram using numpy
-        counts, bin_edges = np.histogram(values, bins=bins)
+    def histo_summary(self, tag: str, values, step: int, bins: int = 1000) -> None:
+        vals = np.array(values)
+        self.writer.add_histogram(tag, vals, step, bins=bins)
 
-        # Fill the fields of the histogram proto
-        hist = tf.HistogramProto()
-        hist.min = float(np.min(values))
-        hist.max = float(np.max(values))
-        hist.num = int(np.prod(values.shape))
-        hist.sum = float(np.sum(values))
-        hist.sum_squares = float(np.sum(values**2))
-
-        # Drop the start of the first bin
-        bin_edges = bin_edges[1:]
-
-        # Add bin edges and counts
-        for edge in bin_edges:
-            hist.bucket_limit.append(edge)
-        for c in counts:
-            hist.bucket.append(c)
-
-        # Create and write Summary
-        summary = tf.Summary(value=[tf.Summary.Value(tag=tag, histo=hist)])
-        self.writer.add_summary(summary, step)
+    def flush(self) -> None:
         self.writer.flush()

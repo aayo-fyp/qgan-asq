@@ -165,8 +165,13 @@ def main(config):
 #         else:
         mols, _, _, a, x, _, _, _, _ = self.data.next_train_batch(self.batch_size)
 #         sample_list = [gen_circuit(gen_weights) for i in range(self.batch_size)]
-        sample_list = [torch.cat([gen_circuit_1(gen_weights), gen_circuit_2(gen_weights), gen_circuit_3(gen_weights),\
-                                  gen_circuit_4(gen_weights)]) for i in range(self.batch_size)]
+        # Convert QNode outputs (which may be lists) to tensors before concat.
+        sample_list = [torch.cat([
+            torch.as_tensor(gen_circuit_1(gen_weights), dtype=torch.float32),
+            torch.as_tensor(gen_circuit_2(gen_weights), dtype=torch.float32),
+            torch.as_tensor(gen_circuit_3(gen_weights), dtype=torch.float32),
+            torch.as_tensor(gen_circuit_4(gen_weights), dtype=torch.float32)
+        ]) for i in range(self.batch_size)]
 #             z = self.sample_z(self.batch_size)
 
         # =================================================================================== #
@@ -393,5 +398,8 @@ if __name__ == '__main__':
     parser.add_argument('--lr_update_step', type=int, default=500)
 
     config = parser.parse_args()
+    # Backwards compatibility: older scripts use --z_dim instead of --qubits
+    if not hasattr(config, 'qubits'):
+        config.qubits = getattr(config, 'z_dim', None)
     print(config)
     main(config)

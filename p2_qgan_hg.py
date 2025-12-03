@@ -1,4 +1,4 @@
-git add .import pennylane as qml
+import pennylane as qml
 import numpy as np
 import random
 import matplotlib.pyplot as plt
@@ -122,7 +122,29 @@ def main(config):
 #         else:
         mols, _, _, a, x, _, _, _, _ = self.data.next_train_batch(self.batch_size)
 #         sample_list = [gen_circuit(gen_weights) for i in range(self.batch_size)]
-        sample_list = [torch.cat([gen_circuit_1(gen_weights), gen_circuit_2(gen_weights)]) for i in range(self.batch_size)]
+        # gen_circuit_* may return lists, numpy arrays, or torch tensors
+        # (PennyLane QNodes can return any of those). Convert each to a
+        # proper torch.Tensor in a safe way:
+        #  - preserve torch.Tensor objects (and their autograd) when they
+        #    are already torch tensors
+        #  - convert numpy arrays via torch.from_numpy (no detach)
+        #  - convert lists/tuples by creating a fresh tensor
+        def _to_torch(v):
+            if isinstance(v, torch.Tensor):
+                # ensure float dtype, keep grad/graph if present
+                return v.to(dtype=torch.float32)
+            if isinstance(v, np.ndarray):
+                return torch.from_numpy(v).to(dtype=torch.float32)
+            # fallback (list, tuple, scalar, etc.) -> makes a new tensor
+            return torch.tensor(v, dtype=torch.float32)
+
+        sample_list = [
+            torch.cat([
+                _to_torch(gen_circuit_1(gen_weights)),
+                _to_torch(gen_circuit_2(gen_weights)),
+            ], dim=0)
+            for _ in range(self.batch_size)
+        ]
 #             z = self.sample_z(self.batch_size)
 
         # =================================================================================== #
@@ -349,5 +371,9 @@ if __name__ == '__main__':
     parser.add_argument('--lr_update_step', type=int, default=500)
 
     config = parser.parse_args()
+    # Backwards compatibility: older scripts use --z_dim instead of --qubits
+    if not hasattr(config, 'qubits'):
+        # ensure solver expects 'qubits' attribute
+        config.qubits = getattr(config, 'z_dim', None)
     print(config)
     main(config)
