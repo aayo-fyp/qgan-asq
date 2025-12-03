@@ -11,12 +11,27 @@ For details see [Quantum Generative Models for Small Molecule Drug Discovery](ht
 
 ## Dependencies
 
-* **python>=3.5**
-* **pytorch>=0.4.1**: https://pytorch.org
-* **rdkit**: https://www.rdkit.org
-* **pennylane**
-* **tensorflow==1.15**
-* **frechetdist**
+Recommended environment (what we've tested with):
+
+- Python 3.10 (conda)
+- PyTorch (1.11+ recommended)
+- RDKit (installed via conda-forge)
+- PennyLane (tested with 0.36.x) and autoray (compatible 0.6.x)
+- TensorFlow (the repo uses TF1-style logging; TF2 is supported via compat.v1 in `logger.py`)
+- frechetdist (for Fréchet distance computations)
+
+Quick setup (using conda):
+
+```bash
+conda create -n fyp_env python=3.10 -y
+conda activate fyp_env
+conda install -c conda-forge rdkit numpy scipy pandas pytorch -y
+pip install pennylane==0.36.0 autoray==0.6.8 frechetdist
+```
+
+Notes:
+- PennyLane/autoray versions are sensitive; if you hit import errors, try the pinned versions above.
+- The project uses the `fyp_env` environment name in some helper scripts — either create that env or activate your equivalent env before running the examples below.
 
 ## Structure
 * [data](https://github.com/jundeli/quantum-gan/data): should contain your datasets. If you run `download_dataset.sh` the script will download the dataset used for the paper (then you should run `data/sparse_molecular_dataset.py` to conver the dataset in a graph format used by MolGAN models).
