@@ -60,7 +60,11 @@ def main(config):
     d_lr = self.d_lr
     if config.quantum:
         gen_weights = torch.tensor(list(np.random.rand(config.layer*(config.qubits*2-1))*2*np.pi-np.pi), requires_grad=True)
-        self.g_optimizer = torch.optim.Adam(list(self.G.parameters())+list(self.V.parameters())+[gen_weights],
+        # Include cycle parameters in the optimizer if a cycle component was instantiated
+        g_params = list(self.G.parameters()) + list(self.V.parameters())
+        if getattr(self, 'cycle', None) is not None:
+            g_params += list(self.cycle.parameters())
+        self.g_optimizer = torch.optim.Adam(g_params + [gen_weights],
                                     self.g_lr, [self.beta1, self.beta2])
 
     # Start training from scratch or resume training.
@@ -261,6 +265,54 @@ def main(config):
             torch.save(self.V.state_dict(), V_path)
             print('Saved model checkpoints into {}...'.format(self.model_save_dir))
 
+        # Periodic sampling: generate and save grid + SMILES
+        if (i+1) % self.sample_step == 0:
+            try:
+                with torch.no_grad():
+                    n_sample = int(getattr(config, 'sample_n', 9))
+                    z_s = self.sample_z(n_sample)
+                    z_s = torch.from_numpy(z_s).to(self.device).float()
+                    edges_logits_s, nodes_logits_s = self.G(z_s)
+                    (edges_hard_s, nodes_hard_s) = self.postprocess((edges_logits_s, nodes_logits_s), 'soft_gumbel')
+                    # convert one-hot to indices
+                    try:
+                        edges_idx = torch.max(edges_hard_s, -1)[1]
+                    except Exception:
+                        edges_idx = edges_hard_s
+                    try:
+                        nodes_idx = torch.max(nodes_hard_s, -1)[1]
+                    except Exception:
+                        nodes_idx = nodes_hard_s
+
+                    mols = []
+                    for e_, n_ in zip(edges_idx, nodes_idx):
+                        try:
+                            m = self.data.matrices2mol(n_.cpu().numpy(), e_.cpu().numpy(), strict=True)
+                            if m is not None:
+                                mols.append(m)
+                        except Exception:
+                            continue
+
+                    if len(mols) > 0:
+                        try:
+                            from rdkit.Chem import Draw
+                            grid = Draw.MolsToGridImage(mols[:n_sample], molsPerRow=3, subImgSize=(250,250))
+                            sample_fname = os.path.join(self.sample_dir, 'samples_iter_{}.png'.format(i+1))
+                            grid.save(sample_fname)
+                        except Exception:
+                            print('Warning: failed to save molecule grid at iter {}'.format(i+1))
+
+                    # save SMILES
+                    try:
+                        smi_fname = os.path.join(self.sample_dir, 'samples_iter_{}.smi'.format(i+1))
+                        with open(smi_fname, 'w') as fh:
+                            for m in mols:
+                                fh.write(Chem.MolToSmiles(m) + '\n')
+                    except Exception:
+                        print('Warning: failed to save SMILES at iter {}'.format(i+1))
+            except Exception as e:
+                print('Error during periodic sampling at iter {}: {}'.format(i+1, e))
+
         # Decay learning rates.
         if (i+1) % self.lr_update_step == 0 and (i+1) > (self.num_iters - self.num_iters_decay):
             g_lr -= (self.g_lr / float(self.num_iters_decay))
@@ -326,6 +378,7 @@ if __name__ == '__main__':
     # Step size.
     parser.add_argument('--log_step', type=int, default=10)
     parser.add_argument('--sample_step', type=int, default=1000)
+    parser.add_argument('--sample_n', type=int, default=9, help='number of molecules to sample and save in grid')
     parser.add_argument('--model_save_step', type=int, default=1000)
     parser.add_argument('--lr_update_step', type=int, default=500)
 

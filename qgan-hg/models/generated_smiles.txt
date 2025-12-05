@@ -1,0 +1,8 @@
+*.*.C.C.C.F.N=O.O
+*.C.C.C.F.F.F.N=O
+*.*.*.C.F.F.F.F.[HH]
+C.C.F.N.N.N.O.O.[HH]
+*.C.F.N.N.O.O.[HH].[HH]
+C.C.C.C#*#N.N.O.[HH]
+*.*.N.N.N.N.O.[H]O
+*.*.*.*.*.*.*.*.O
