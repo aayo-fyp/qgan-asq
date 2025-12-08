@@ -247,15 +247,22 @@ if HAS_PENNYLANE:
 
         Encodes a classical vector into qubit angles via a linear encoder,
         applies repeated variational blocks (n_reps) with n_layers per rep,
-        and returns per-qubit PauliZ expectation values as a classical latent.
+        and returns a probability distribution over the computational basis states.
+        
+        As per the paper: "The output of the VQC is a probability distribution over
+        the computational basis states" - this outputs 2^n_qubits probabilities.
+        
+        Ancilla truncation: If n_ancilla > 0, the probability vector is truncated
+        to remove ancilla elements, keeping the first (2^n_qubits - n_ancilla) values.
         """
 
-        def __init__(self, input_dim: int = 64, n_qubits: int = 8, n_reps: int = 8, n_layers: int = 1, batch: bool = False):
+        def __init__(self, input_dim: int = 64, n_qubits: int = 8, n_reps: int = 8, n_layers: int = 1, n_ancilla: int = 0, batch: bool = False):
             super().__init__()
             self.input_dim = int(input_dim)
             self.n_qubits = int(n_qubits)
             self.n_reps = int(n_reps)
             self.n_layers = int(n_layers)
+            self.n_ancilla = int(n_ancilla)
             self.batch = bool(batch)
 
             # classical encoder to map input_dim -> n_qubits angles
@@ -264,6 +271,10 @@ if HAS_PENNYLANE:
             # trainable circuit weights count: weights per repetition
             self._weight_count = vqc_weight_count(self.n_qubits, self.n_layers) * self.n_reps
             self.weights = nn.Parameter(torch.randn(self._weight_count) * 0.01)
+
+            # output dimension: 2^n_qubits probabilities, truncated for ancilla
+            self._full_output_dim = 2 ** self.n_qubits
+            self._truncated_output_dim = vqc_truncated_dim(self.n_qubits, self.n_ancilla)
 
             # create qnode with desired repetition behavior
             def _create_qdi_qnode(n_qubits=self.n_qubits, n_layers=self.n_layers, n_reps=self.n_reps):
@@ -287,15 +298,23 @@ if HAS_PENNYLANE:
                                 qml.RZ(weights[idx], wires=i + 1)
                                 idx += 1
 
-                    # return expectation values per qubit (map to latent z_dim)
-                    return tuple(qml.expval(qml.PauliZ(i)) for i in range(n_qubits))
+                    # Return full probability vector over computational basis (2^n_qubits values)
+                    return qml.probs(wires=range(n_qubits))
 
                 return qdi_node
 
             self._qnode = _create_qdi_qnode()
 
+        @property
+        def output_dim(self) -> int:
+            """Return the output dimension after ancilla truncation."""
+            return self._truncated_output_dim
+
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """Forward: x shape (batch, input_dim) -> returns (batch, n_qubits)"""
+            """Forward: x shape (batch, input_dim) -> returns (batch, output_dim).
+            
+            Output dimension is 2^n_qubits - n_ancilla (truncated probability vector).
+            """
             single = False
             if x.dim() == 1:
                 x = x.unsqueeze(0)
@@ -311,19 +330,28 @@ if HAS_PENNYLANE:
                     dev = qnode.device
                     tapes = [qnode.construct((self.weights, a.unsqueeze(0)), {}) for a in angles]
                     results = dev.batch_execute(tapes)
-                    # results expected shape (batch, n_qubits)
+                    # results expected shape (batch, 2^n_qubits)
                     out_batch = torch.tensor(results).to(dtype=torch.float32)
+                    # Apply ancilla truncation
+                    if self.n_ancilla > 0:
+                        out_batch = out_batch[:, :self._truncated_output_dim]
                     outputs = [o for o in out_batch]
                 except Exception:
                     for a in angles:
-                        exps = self._qnode(self.weights, a)
-                        out = torch.stack(list(exps)).to(dtype=torch.float32)
-                        outputs.append(out)
+                        probs = self._qnode(self.weights, a)
+                        # Apply ancilla truncation
+                        if self.n_ancilla > 0:
+                            probs = probs[:self._truncated_output_dim]
+                        probs = probs.to(dtype=torch.float32)
+                        outputs.append(probs)
             else:
                 for a in angles:
-                    exps = self._qnode(self.weights, a)
-                    out = torch.stack(list(exps)).to(dtype=torch.float32)
-                    outputs.append(out)
+                    probs = self._qnode(self.weights, a)
+                    # Apply ancilla truncation
+                    if self.n_ancilla > 0:
+                        probs = probs[:self._truncated_output_dim]
+                    probs = probs.to(dtype=torch.float32)
+                    outputs.append(probs)
 
             out = torch.stack(outputs, dim=0)
             return out[0] if single else out
@@ -340,17 +368,21 @@ else:
         """Fallback QDILayer implemented in pure PyTorch.
 
         The implementation simulates a repeated (n_reps) transformation of
-        encoded angles via a weight-derived linear map and a tanh nonlinearity
-        to produce outputs in [-1, 1], matching the shape and gradient
-        behaviour of the quantum implementation for tests.
+        encoded angles via a weight-derived linear map and softmax to produce
+        a probability distribution over 2^n_qubits states, matching the shape
+        and gradient behaviour of the quantum implementation for tests.
+        
+        Ancilla truncation: If n_ancilla > 0, the probability vector is truncated
+        to remove ancilla elements, keeping the first (2^n_qubits - n_ancilla) values.
         """
 
-        def __init__(self, input_dim: int = 64, n_qubits: int = 8, n_reps: int = 8, n_layers: int = 1, batch: bool = False):
+        def __init__(self, input_dim: int = 64, n_qubits: int = 8, n_reps: int = 8, n_layers: int = 1, n_ancilla: int = 0, batch: bool = False):
             super().__init__()
             self.input_dim = int(input_dim)
             self.n_qubits = int(n_qubits)
             self.n_reps = int(n_reps)
             self.n_layers = int(n_layers)
+            self.n_ancilla = int(n_ancilla)
             self.batch = bool(batch)
 
             # classical encoder to map input_dim -> n_qubits angles
@@ -358,9 +390,19 @@ else:
 
             # keep a flat parameter vector to mirror the quantum version
             self._weight_count = vqc_weight_count(self.n_qubits, self.n_layers) * self.n_reps
-            # if the weight count is too small to build a square map, allow
-            # tiling to produce a square matrix for the simulator
             self.weights = nn.Parameter(torch.randn(self._weight_count) * 0.01)
+
+            # output dimension: 2^n_qubits probabilities, truncated for ancilla
+            self._full_output_dim = 2 ** self.n_qubits
+            self._truncated_output_dim = vqc_truncated_dim(self.n_qubits, self.n_ancilla)
+
+            # linear layer to map from n_qubits to full output dimension
+            self._output_layer = nn.Linear(self.n_qubits, self._full_output_dim)
+
+        @property
+        def output_dim(self) -> int:
+            """Return the output dimension after ancilla truncation."""
+            return self._truncated_output_dim
 
         def _simulate_one(self, angles: torch.Tensor) -> torch.Tensor:
             """Simulate a single-sample QDI forward using the flat weights.
@@ -368,7 +410,7 @@ else:
             Args:
                 angles: tensor shape (n_qubits,)
             Returns:
-                tensor shape (n_qubits,) with values in [-1, 1]
+                tensor shape (output_dim,) with probability values summing to ~1
             """
             # Build a square matrix from weights (n_qubits x n_qubits)
             mat_size = self.n_qubits * self.n_qubits
@@ -387,12 +429,27 @@ else:
             else:
                 bias = torch.zeros(self.n_qubits, device=angles.device, dtype=angles.dtype)
 
-            out = torch.matmul(mat, angles) + bias
-            # apply a mild nonlinearity to map to [-1,1]
-            out = torch.tanh(out)
-            return out
+            # Transform through the simulated variational layers
+            hidden = torch.matmul(mat, angles) + bias
+            hidden = torch.tanh(hidden)
+
+            # Map to full output dimension (2^n_qubits)
+            logits = self._output_layer(hidden)
+            
+            # Apply softmax to get probability distribution
+            probs = torch.softmax(logits, dim=-1)
+            
+            # Apply ancilla truncation
+            if self.n_ancilla > 0:
+                probs = probs[:self._truncated_output_dim]
+            
+            return probs
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Forward: x shape (batch, input_dim) -> returns (batch, output_dim).
+            
+            Output dimension is 2^n_qubits - n_ancilla (truncated probability vector).
+            """
             single = False
             if x.dim() == 1:
                 x = x.unsqueeze(0)

@@ -142,8 +142,11 @@ class HQCycle(nn.Module):
     This composes a `ClassicalCycle` that reduces a flattened graph/features tensor
     to an intermediate classical vector (default 64), then feeds that vector into
     a `QDILayer` which encodes into qubits using repeated encoding layers and
-    returns a per-qubit expectation vector. An optional linear mapper projects
-    the quantum output to the desired latent `z_dim` for the Generator.
+    returns a probability distribution over 2^n_qubits computational basis states.
+    A linear mapper projects the quantum output to the desired latent `z_dim` for the Generator.
+    
+    Note: QDILayer now outputs 2^n_qubits probabilities (e.g., 256 for 8 qubits),
+    optionally truncated by n_ancilla. The post_mapper always maps this to z_dim.
     """
 
     def __init__(
@@ -180,9 +183,11 @@ class HQCycle(nn.Module):
         qdi_call_kwargs.pop('n_qubits', None)
         self.qdi = QDILayer(input_dim=self.intermediate_dim, n_qubits=n_qubits, **qdi_call_kwargs)
 
-        # If quantum output dim differs from requested z_dim, add a mapper
-        if self.qdi.n_qubits != self.z_dim:
-            self.post_mapper = nn.Linear(self.qdi.n_qubits, self.z_dim)
+        # QDILayer now outputs 2^n_qubits probabilities (truncated by n_ancilla)
+        # Always need a mapper to project to z_dim
+        qdi_output_dim = self.qdi.output_dim  # 2^n_qubits - n_ancilla
+        if qdi_output_dim != self.z_dim:
+            self.post_mapper = nn.Linear(qdi_output_dim, self.z_dim)
         else:
             self.post_mapper = None
 
@@ -196,7 +201,7 @@ class HQCycle(nn.Module):
                     nn.init.zeros_(m.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass: x -> classical encoder -> qdi -> optional mapper -> z
+        """Forward pass: x -> classical encoder -> qdi -> mapper -> z
 
         Args:
             x: Tensor of shape (batch, input_dim)
@@ -207,7 +212,7 @@ class HQCycle(nn.Module):
         # classical reduction
         hidden = self.classical_encoder(x)
 
-        # quantum block: returns (batch, n_qubits)
+        # quantum block: returns (batch, 2^n_qubits - n_ancilla) probability distribution
         q_out = self.qdi(hidden)
 
         if self.post_mapper is not None:

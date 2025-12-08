@@ -13,10 +13,11 @@ from cycle_components import HQCycle
 
 
 def test_qdilayer_forward_backward():
-    """QDILayer forward returns (batch, n_qubits) and gradients flow."""
+    """QDILayer forward returns (batch, 2^n_qubits) probabilities and gradients flow."""
     batch = 2
     input_dim = 10
     n_qubits = 4
+    expected_output_dim = 2 ** n_qubits  # QDILayer now outputs probabilities
 
     qdi = QDILayer(input_dim=input_dim, n_qubits=n_qubits, n_reps=1, n_layers=1)
     qdi.train()
@@ -24,7 +25,9 @@ def test_qdilayer_forward_backward():
     x = torch.randn(batch, input_dim, requires_grad=True)
     out = qdi(x)
 
-    assert out.shape == (batch, n_qubits)
+    # QDILayer now outputs 2^n_qubits probability values (16 for 4 qubits)
+    assert out.shape == (batch, expected_output_dim)
+    assert qdi.output_dim == expected_output_dim
 
     loss = out.pow(2).sum()
     loss.backward()
@@ -79,6 +82,7 @@ def test_qdilayer_batched_matches_unbatched():
     batch = 4
     input_dim = 12
     n_qubits = 4
+    expected_output_dim = 2 ** n_qubits
 
     # unbatched
     qdi_u = QDILayer(input_dim=input_dim, n_qubits=n_qubits, n_reps=1, n_layers=1, batch=False)
@@ -89,12 +93,19 @@ def test_qdilayer_batched_matches_unbatched():
         qdi_b.weights.copy_(qdi_u.weights)
         qdi_b.encoder.weight.copy_(qdi_u.encoder.weight)
         qdi_b.encoder.bias.copy_(qdi_u.encoder.bias)
+        # sync output layer if it exists (fallback implementation)
+        if hasattr(qdi_u, '_output_layer') and hasattr(qdi_b, '_output_layer'):
+            qdi_b._output_layer.weight.copy_(qdi_u._output_layer.weight)
+            qdi_b._output_layer.bias.copy_(qdi_u._output_layer.bias)
 
     x = torch.randn(batch, input_dim, requires_grad=True)
 
     out_u = qdi_u(x)
     out_b = qdi_b(x)
 
+    # Both should output 2^n_qubits probabilities
+    assert out_u.shape == (batch, expected_output_dim)
+    assert out_b.shape == (batch, expected_output_dim)
     assert out_u.shape == out_b.shape
 
     loss_u = out_u.pow(2).sum()
