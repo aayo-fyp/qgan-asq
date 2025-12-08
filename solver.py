@@ -367,8 +367,12 @@ class Solver(object):
                         z_hat = z_hat.view(z.shape)
                     cycle_loss = F.mse_loss(z, z_hat)
 
-                g_loss = g_loss_fake + g_loss_value + self.lambda_cycle * cycle_loss
+                wgan_loss = g_loss_fake + g_loss_value
+                g_loss = self.lambda_cycle * wgan_loss + (1.0 - self.lambda_cycle) * cycle_loss
                 self.reset_grad()
+
+               
+
                 g_loss.backward()
                 self.g_optimizer.step()
 
